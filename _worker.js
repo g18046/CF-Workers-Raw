@@ -1,30 +1,30 @@
-let token = "";
-
 export default {
 	async fetch(request, env) {
 		const url = new URL(request.url);
 
 		if (url.pathname !== '/') {
-			let githubRawUrl = 'https://raw.githubusercontent.com';
-			if (new RegExp(githubRawUrl, 'i').test(url.pathname)) {
-				githubRawUrl += url.pathname.split(githubRawUrl)[1];
-			} else {
-				if (env.GH_NAME) {
-					githubRawUrl += '/' + env.GH_NAME;
-					if (env.GH_REPO) {
-						githubRawUrl += '/' + env.GH_REPO;
-						if (env.GH_BRANCH) githubRawUrl += '/' + env.GH_BRANCH;
-					}
-				}
-				githubRawUrl += url.pathname;
+			let path = url.pathname;
+			let owner = env.GH_NAME;
+			let repo = env.GH_REPO;
+			let ref = env.GH_BRANCH || 'main';
+
+			// 如果请求路径自带了完整 github 地址，进行提取
+			if (/raw\.githubusercontent\.com/i.test(path)) {
+				const parts = path.split('raw.githubusercontent.com/')[1].split('/');
+				owner = parts[0];
+				repo = parts[1];
+				ref = parts[2];
+				path = '/' + parts.slice(3).join('/');
 			}
 
-			// 1. 给 GitHub 请求追加随机时间戳参数，击穿 GitHub 自身的 CDN 缓存
-			const rawUrlObj = new URL(githubRawUrl);
-			rawUrlObj.searchParams.set('_t', Date.now().toString());
+			// 构建 GitHub REST API 请求 URL（API 是绝对无缓存的）
+			const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 
-			// 初始化请求头
-			const headers = new Headers();
+			const headers = new Headers({
+				'User-Agent': 'Cloudflare-Worker-Proxy',
+				'Accept': 'application/vnd.github.v3.raw', // 关键：要求 GitHub API 直接返回文件原始二进制/文本内容
+			});
+
 			let authTokenSet = false;
 
 			// 检查 TOKEN_PATH 特殊路径鉴权
@@ -44,54 +44,41 @@ export default {
 
 					if (pathMatches) {
 						const providedToken = url.searchParams.get('token');
-						if (!providedToken) {
-							return new Response('TOKEN不能为空', { status: 400 });
-						}
+						if (!providedToken) return new Response('TOKEN不能为空', { status: 400 });
+						if (providedToken !== requiredToken.trim()) return new Response('TOKEN错误', { status: 403 });
 
-						if (providedToken !== requiredToken.trim()) {
-							return new Response('TOKEN错误', { status: 403 });
-						}
-
-						if (!env.GH_TOKEN) {
-							return new Response('服务器GitHub TOKEN配置错误', { status: 500 });
-						}
-						headers.append('Authorization', `token ${env.GH_TOKEN}`);
+						if (!env.GH_TOKEN) return new Response('服务器GitHub TOKEN配置错误', { status: 500 });
+						headers.set('Authorization', `token ${env.GH_TOKEN}`);
 						authTokenSet = true;
 						break;
 					}
 				}
 			}
 
-			// 如果 TOKEN_PATH 没有设置认证，使用默认 token 逻辑
+			// 默认 Token 验证
 			if (!authTokenSet) {
-				if (env.GH_TOKEN && env.TOKEN) {
-					if (env.TOKEN == url.searchParams.get('token')) token = env.GH_TOKEN || token;
-					else token = url.searchParams.get('token') || token;
-				} else token = url.searchParams.get('token') || env.GH_TOKEN || env.TOKEN || token;
-
-				const githubToken = token;
-				if (!githubToken || githubToken == '') {
+				let githubToken = url.searchParams.get('token') || env.GH_TOKEN || env.TOKEN;
+				if (!githubToken) {
 					return new Response('TOKEN不能为空', { status: 400 });
 				}
-				headers.append('Authorization', `token ${githubToken}`);
+				headers.set('Authorization', `token ${githubToken}`);
 			}
 
-			// 2. 发起请求：开启 cf: { cacheTtl: 0 } 禁用 Cloudflare 节点缓存
-			const response = await fetch(rawUrlObj.toString(), {
+			// 发起 API 请求，并向 Cloudflare 声明完全不缓存
+			const response = await fetch(apiUrl, {
 				headers,
 				cf: {
-					cacheTtl: 0,
+					cacheTtlByStatus: { "200-299": -1, "400-599": 0 }, // 禁用 CF 所有级别的缓存
 					cacheEverything: false
 				}
 			});
 
-			// 3. 构建强力“无缓存”响应头，阻止浏览器和中间代理缓存
+			// 强制给浏览器和中转代理下发无缓存指令
 			const noCacheHeaders = new Headers(response.headers);
-			noCacheHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+			noCacheHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
 			noCacheHeaders.set('Pragma', 'no-cache');
 			noCacheHeaders.set('Expires', '0');
 
-			// 检查请求是否成功
 			if (response.ok) {
 				return new Response(response.body, {
 					status: response.status,
@@ -106,7 +93,7 @@ export default {
 			}
 
 		} else {
-			// 首页逻辑
+			// 根目录处理
 			const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
 			if (envKey) {
 				const URLs = await ADD(env[envKey]);
@@ -117,7 +104,7 @@ export default {
 			return new Response(await nginx(), {
 				headers: {
 					'Content-Type': 'text/html; charset=UTF-8',
-					'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+					'Cache-Control': 'no-store, no-cache'
 				},
 			});
 		}
@@ -125,28 +112,7 @@ export default {
 };
 
 async function nginx() {
-	return `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and working. Further configuration is required.</p>
-	<p>For online documentation and support please refer to <a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at <a href="http://nginx.com/">nginx.com</a>.</p>
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
-	`;
+	return `<!DOCTYPE html><html><head><title>Welcome to nginx!</title><style>body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }</style></head><body><h1>Welcome to nginx!</h1><p>If you see this page, the nginx web server is successfully installed and working.</p></body></html>`;
 }
 
 async function ADD(envadd) {
