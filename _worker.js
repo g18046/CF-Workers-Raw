@@ -8,7 +8,6 @@ export default {
 			let repo = env.GH_REPO;
 			let ref = env.GH_BRANCH || 'main';
 
-			// 如果请求路径自带了完整 github 地址，进行提取
 			if (/raw\.githubusercontent\.com/i.test(path)) {
 				const parts = path.split('raw.githubusercontent.com/')[1].split('/');
 				owner = parts[0];
@@ -17,17 +16,17 @@ export default {
 				path = '/' + parts.slice(3).join('/');
 			}
 
-			// 构建 GitHub REST API 请求 URL（API 是绝对无缓存的）
+			// 无缓存 GitHub API 链接
 			const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 
 			const headers = new Headers({
 				'User-Agent': 'Cloudflare-Worker-Proxy',
-				'Accept': 'application/vnd.github.v3.raw', // 关键：要求 GitHub API 直接返回文件原始二进制/文本内容
+				'Accept': 'application/vnd.github.v3.raw',
 			});
 
 			let authTokenSet = false;
 
-			// 检查 TOKEN_PATH 特殊路径鉴权
+			// TOKEN_PATH 校验
 			if (env.TOKEN_PATH) {
 				const 需要鉴权的路径配置 = await ADD(env.TOKEN_PATH);
 				const normalizedPathname = decodeURIComponent(url.pathname.toLowerCase());
@@ -55,7 +54,7 @@ export default {
 				}
 			}
 
-			// 默认 Token 验证
+			// 默认 Token 校验
 			if (!authTokenSet) {
 				let githubToken = url.searchParams.get('token') || env.GH_TOKEN || env.TOKEN;
 				if (!githubToken) {
@@ -64,36 +63,45 @@ export default {
 				headers.set('Authorization', `token ${githubToken}`);
 			}
 
-			// 发起 API 请求，并向 Cloudflare 声明完全不缓存
+			// 请求 GitHub API
 			const response = await fetch(apiUrl, {
 				headers,
 				cf: {
-					cacheTtlByStatus: { "200-299": -1, "400-599": 0 }, // 禁用 CF 所有级别的缓存
+					cacheTtlByStatus: { "200-299": -1, "400-599": 0 },
 					cacheEverything: false
 				}
 			});
 
-			// 强制给浏览器和中转代理下发无缓存指令
-			const noCacheHeaders = new Headers(response.headers);
-			noCacheHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-			noCacheHeaders.set('Pragma', 'no-cache');
-			noCacheHeaders.set('Expires', '0');
-
 			if (response.ok) {
-				return new Response(response.body, {
-					status: response.status,
-					headers: noCacheHeaders
-				});
+				const textData = await response.text();
+				const resHeaders = new Headers();
+
+				// 1. 无缓存设置
+				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+				resHeaders.set('Access-Control-Allow-Origin', '*');
+
+				// 2. 判断是预览还是下载
+				if (url.searchParams.has('dl')) {
+					// 加了 ?dl 参数 -> 触发下载
+					const filename = path.split('/').pop() || 'file.txt';
+					resHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+					resHeaders.set('Content-Type', 'application/octet-stream');
+				} else {
+					// 没加 ?dl 参数 -> 纯文本预览
+					resHeaders.set('Content-Type', 'text/plain; charset=utf-8');
+				}
+
+				return new Response(textData, { status: 200, headers: resHeaders });
 			} else {
 				const errorText = env.ERROR || '无法获取文件，检查路径或TOKEN是否正确。';
 				return new Response(errorText, {
 					status: response.status,
-					headers: noCacheHeaders
+					headers: { 'Content-Type': 'text/plain; charset=utf-8' }
 				});
 			}
 
 		} else {
-			// 根目录处理
+			// 首页重定向或伪装
 			const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
 			if (envKey) {
 				const URLs = await ADD(env[envKey]);
