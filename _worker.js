@@ -8,6 +8,7 @@ export default {
 			let repo = env.GH_REPO;
 			let ref = env.GH_BRANCH || 'main';
 
+			// 如果请求路径自带了完整 github 地址，进行提取
 			if (/raw\.githubusercontent\.com/i.test(path)) {
 				const parts = path.split('raw.githubusercontent.com/')[1].split('/');
 				owner = parts[0];
@@ -16,7 +17,7 @@ export default {
 				path = '/' + parts.slice(3).join('/');
 			}
 
-			// 无缓存 GitHub API 链接
+			// 无缓存 GitHub API 请求 URL
 			const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 
 			const headers = new Headers({
@@ -26,7 +27,7 @@ export default {
 
 			let authTokenSet = false;
 
-			// TOKEN_PATH 校验
+			// TOKEN_PATH 特殊路径鉴权
 			if (env.TOKEN_PATH) {
 				const 需要鉴权的路径配置 = await ADD(env.TOKEN_PATH);
 				const normalizedPathname = decodeURIComponent(url.pathname.toLowerCase());
@@ -63,7 +64,7 @@ export default {
 				headers.set('Authorization', `token ${githubToken}`);
 			}
 
-			// 请求 GitHub API
+			// 发起 API 请求（全链路禁缓存）
 			const response = await fetch(apiUrl, {
 				headers,
 				cf: {
@@ -76,18 +77,21 @@ export default {
 				const textData = await response.text();
 				const resHeaders = new Headers();
 
-				// 1. 无缓存设置
+				// 基础请求头（禁缓存、支持跨域）
 				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
 				resHeaders.set('Access-Control-Allow-Origin', '*');
 
-				// 2. 判断是预览还是下载
+				// 只要 URL 带有 ?dl 参数（如 ?dl=1 或 ?dl）就触发下载
 				if (url.searchParams.has('dl')) {
-					// 加了 ?dl 参数 -> 触发下载
-					const filename = path.split('/').pop() || 'file.txt';
-					resHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+					// 从路径提取原始文件名（例如 /a/b/demo.js -> demo.js）
+					const rawFilename = path.split('/').pop();
+					const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
+
+					// 注入 Content-Disposition 响应头，强制浏览器下载并保存为源文件名
+					resHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 					resHeaders.set('Content-Type', 'application/octet-stream');
 				} else {
-					// 没加 ?dl 参数 -> 纯文本预览
+					// 无 dl 参数时保持纯文本展示，方便预览/读取
 					resHeaders.set('Content-Type', 'text/plain; charset=utf-8');
 				}
 
@@ -101,7 +105,7 @@ export default {
 			}
 
 		} else {
-			// 首页重定向或伪装
+			// 根路径逻辑（重定向或伪装页）
 			const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
 			if (envKey) {
 				const URLs = await ADD(env[envKey]);
