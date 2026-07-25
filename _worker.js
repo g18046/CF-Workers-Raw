@@ -1,5 +1,18 @@
 export default {
 	async fetch(request, env) {
+		// 1. 处理 OPTIONS 预检请求（解决挂梯子时的 CORS 跨域拦截）
+		if (request.method === 'OPTIONS') {
+			return new Response(null, {
+				status: 204,
+				headers: {
+					'Access-Control-Allow-Origin': '*',
+					'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+					'Access-Control-Allow-Headers': '*',
+					'Access-Control-Max-Age': '86400',
+				},
+			});
+		}
+
 		const url = new URL(request.url);
 
 		if (url.pathname !== '/') {
@@ -8,20 +21,26 @@ export default {
 			let repo = env.GH_REPO;
 			let ref = env.GH_BRANCH || 'main';
 
-			// 如果请求路径自带了完整 github 地址，进行提取
-			if (/raw\.githubusercontent\.com/i.test(path)) {
-				const parts = path.split('raw.githubusercontent.com/')[1].split('/');
-				owner = parts[0];
-				repo = parts[1];
-				ref = parts[2];
-				path = '/' + parts.slice(3).join('/');
+			// 解析 raw.githubusercontent.com 链接
+			const decodedPath = decodeURIComponent(path);
+			if (/raw\.githubusercontent\.com/i.test(decodedPath)) {
+				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i)[1];
+				if (rawPart) {
+					const parts = rawPart.split('/');
+					if (parts.length >= 3) {
+						owner = parts[0];
+						repo = parts[1];
+						ref = parts[2];
+						path = '/' + parts.slice(3).join('/');
+					}
+				}
 			}
 
 			// 无缓存 GitHub API 请求 URL
 			const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 
 			const headers = new Headers({
-				'User-Agent': 'Cloudflare-Worker-Proxy',
+				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cloudflare-Worker',
 				'Accept': 'application/vnd.github.v3.raw',
 			});
 
@@ -77,21 +96,19 @@ export default {
 				const textData = await response.text();
 				const resHeaders = new Headers();
 
-				// 基础请求头（禁缓存、支持跨域）
+				// 基础响应头（支持跨域与禁缓存）
 				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
 				resHeaders.set('Access-Control-Allow-Origin', '*');
+				resHeaders.set('Access-Control-Allow-Headers', '*');
 
-				// 只要 URL 带有 ?dl 参数（如 ?dl=1 或 ?dl）就触发下载
+				// 处理附件下载逻辑
 				if (url.searchParams.has('dl')) {
-					// 从路径提取原始文件名（例如 /a/b/demo.js -> demo.js）
 					const rawFilename = path.split('/').pop();
 					const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
 
-					// 注入 Content-Disposition 响应头，强制浏览器下载并保存为源文件名
 					resHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 					resHeaders.set('Content-Type', 'application/octet-stream');
 				} else {
-					// 无 dl 参数时保持纯文本展示，方便预览/读取
 					resHeaders.set('Content-Type', 'text/plain; charset=utf-8');
 				}
 
@@ -100,12 +117,15 @@ export default {
 				const errorText = env.ERROR || '无法获取文件，检查路径或TOKEN是否正确。';
 				return new Response(errorText, {
 					status: response.status,
-					headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+					headers: { 
+						'Content-Type': 'text/plain; charset=utf-8',
+						'Access-Control-Allow-Origin': '*'
+					}
 				});
 			}
 
 		} else {
-			// 根路径逻辑（重定向或伪装页）
+			// 根路径逻辑
 			const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
 			if (envKey) {
 				const URLs = await ADD(env[envKey]);
@@ -116,7 +136,8 @@ export default {
 			return new Response(await nginx(), {
 				headers: {
 					'Content-Type': 'text/html; charset=UTF-8',
-					'Cache-Control': 'no-store, no-cache'
+					'Cache-Control': 'no-store, no-cache',
+					'Access-Control-Allow-Origin': '*'
 				},
 			});
 		}
