@@ -101,15 +101,43 @@ export default {
 				resHeaders.set('Access-Control-Allow-Origin', '*');
 				resHeaders.set('Access-Control-Allow-Headers', '*');
 
+				// 【核心修复】解析原始文件名与后缀
+				const rawFilename = path.split('/').pop();
+				const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
+				const ext = filename.split('.').pop().toLowerCase();
+
+				// 常见 MIME 类型映射表，确保浏览器能正确识别后缀
+				const mimeTypes = {
+					'txt': 'text/plain; charset=utf-8',
+					'html': 'text/html; charset=utf-8',
+					'css': 'text/css; charset=utf-8',
+					'js': 'application/javascript; charset=utf-8',
+					'json': 'application/json; charset=utf-8',
+					'png': 'image/png',
+					'jpg': 'image/jpeg',
+					'jpeg': 'image/jpeg',
+					'gif': 'image/gif',
+					'webp': 'image/webp',
+					'svg': 'image/svg+xml',
+					'pdf': 'application/pdf',
+					'zip': 'application/zip',
+					'tar': 'application/x-tar',
+					'gz': 'application/gzip',
+					'mp3': 'audio/mpeg',
+					'mp4': 'video/mp4',
+					'md': 'text/markdown; charset=utf-8'
+				};
+
+				const contentType = mimeTypes[ext] || 'application/octet-stream';
+
 				// 处理附件下载逻辑
 				if (url.searchParams.has('dl')) {
-					const rawFilename = path.split('/').pop();
-					const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
-
-					resHeaders.set('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
-					resHeaders.set('Content-Type', 'application/octet-stream');
+					// 修复关键：标准规范的 filename 声明，解决中文及特殊字符乱码，保留原始后缀
+					resHeaders.set('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+					resHeaders.set('Content-Type', contentType);
 				} else {
-					resHeaders.set('Content-Type', 'text/plain; charset=utf-8');
+					// 即使不带 ?dl，也根据文件类型返回正确的 Content-Type（如图片或PDF可以直接在浏览器预览）
+					resHeaders.set('Content-Type', contentType);
 				}
 
 				return new Response(textData, { status: 200, headers: resHeaders });
