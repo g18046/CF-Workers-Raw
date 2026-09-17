@@ -21,27 +21,31 @@ export default {
 			let repo = env.GH_REPO;
 			let ref = env.GH_BRANCH || 'main';
 
-			// 解析 raw.githubusercontent.com 链接
+			// 解析 ://githubusercontent.com 链接
 			const decodedPath = decodeURIComponent(path);
 			if (/raw\.githubusercontent\.com/i.test(decodedPath)) {
-				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i)[1];
+				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i);
 				if (rawPart) {
 					const parts = rawPart.split('/');
 					if (parts.length >= 3) {
-						owner = parts[0];
-						repo = parts[1];
-						ref = parts[2];
+						owner = parts;
+						repo = parts;
+						ref = parts;
 						path = '/' + parts.slice(3).join('/');
 					}
 				}
 			}
 
 			// 无缓存 GitHub API 请求 URL
-			const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
+			const apiUrl = `https://github.com{owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 
 			const headers = new Headers({
 				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cloudflare-Worker',
 				'Accept': 'application/vnd.github.v3.raw',
+				// 【修改点 1】强迫 GitHub 必须返回最新数据，不使用其 ETag 缓存
+				'Cache-Control': 'no-cache, no-store, must-revalidate',
+				'Pragma': 'no-cache',
+				'If-None-Match': '' 
 			});
 
 			let authTokenSet = false;
@@ -87,6 +91,8 @@ export default {
 			const response = await fetch(apiUrl, {
 				headers,
 				cf: {
+					// 【修改点 2】显式要求 Cloudflare 边缘节点绝对不要缓存此请求
+					cacheTtl: -1, 
 					cacheTtlByStatus: { "200-299": -1, "400-599": 0 },
 					cacheEverything: false
 				}
@@ -96,17 +102,19 @@ export default {
 				const textData = await response.text();
 				const resHeaders = new Headers();
 
-				// 基础响应头（支持跨域与禁缓存）
-				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+				// 【修改点 3】最高级别的禁缓存响应头，覆盖 GitHub 返回的任何 ETag / Last-Modified
+				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+				resHeaders.set('Pragma', 'no-cache');
+				resHeaders.set('Expires', '0');
 				resHeaders.set('Access-Control-Allow-Origin', '*');
 				resHeaders.set('Access-Control-Allow-Headers', '*');
 
-				// 【核心修复】解析原始文件名与后缀
+				// 解析原始文件名与后缀
 				const rawFilename = path.split('/').pop();
 				const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
 				const ext = filename.split('.').pop().toLowerCase();
 
-				// 常见 MIME 类型映射表，确保浏览器能正确识别后缀
+				// 常见 MIME 类型映射表
 				const mimeTypes = {
 					'txt': 'text/plain; charset=utf-8',
 					'html': 'text/html; charset=utf-8',
@@ -132,11 +140,9 @@ export default {
 
 				// 处理附件下载逻辑
 				if (url.searchParams.has('dl')) {
-					// 修复关键：标准规范的 filename 声明，解决中文及特殊字符乱码，保留原始后缀
 					resHeaders.set('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 					resHeaders.set('Content-Type', contentType);
 				} else {
-					// 即使不带 ?dl，也根据文件类型返回正确的 Content-Type（如图片或PDF可以直接在浏览器预览）
 					resHeaders.set('Content-Type', contentType);
 				}
 
@@ -147,7 +153,8 @@ export default {
 					status: response.status,
 					headers: { 
 						'Content-Type': 'text/plain; charset=utf-8',
-						'Access-Control-Allow-Origin': '*'
+						'Access-Control-Allow-Origin': '*',
+						'Cache-Control': 'no-store'
 					}
 				});
 			}
