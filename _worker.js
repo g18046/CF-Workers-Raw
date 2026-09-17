@@ -24,13 +24,13 @@ export default {
 			// 解析 ://githubusercontent.com 链接
 			const decodedPath = decodeURIComponent(path);
 			if (/raw\.githubusercontent\.com/i.test(decodedPath)) {
-				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i);
+				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i)[1];
 				if (rawPart) {
 					const parts = rawPart.split('/');
 					if (parts.length >= 3) {
-						owner = parts;
-						repo = parts;
-						ref = parts;
+						owner = parts[0];
+						repo = parts[1];
+						ref = parts[2];
 						path = '/' + parts.slice(3).join('/');
 					}
 				}
@@ -42,7 +42,7 @@ export default {
 			const headers = new Headers({
 				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cloudflare-Worker',
 				'Accept': 'application/vnd.github.v3.raw',
-				// 【修改点 1】强迫 GitHub 必须返回最新数据，不使用其 ETag 缓存
+				// 强迫 GitHub 必须返回最新数据，不使用其 ETag 缓存
 				'Cache-Control': 'no-cache, no-store, must-revalidate',
 				'Pragma': 'no-cache',
 				'If-None-Match': '' 
@@ -91,7 +91,7 @@ export default {
 			const response = await fetch(apiUrl, {
 				headers,
 				cf: {
-					// 【修改点 2】显式要求 Cloudflare 边缘节点绝对不要缓存此请求
+					// 显式要求 Cloudflare 边缘节点绝对不要缓存此请求
 					cacheTtl: -1, 
 					cacheTtlByStatus: { "200-299": -1, "400-599": 0 },
 					cacheEverything: false
@@ -102,7 +102,7 @@ export default {
 				const textData = await response.text();
 				const resHeaders = new Headers();
 
-				// 【修改点 3】最高级别的禁缓存响应头，覆盖 GitHub 返回的任何 ETag / Last-Modified
+				// 最高级别的禁缓存响应头，覆盖 GitHub 返回的任何 ETag / Last-Modified
 				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
 				resHeaders.set('Pragma', 'no-cache');
 				resHeaders.set('Expires', '0');
