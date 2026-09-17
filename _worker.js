@@ -21,32 +21,33 @@ export default {
 			let repo = env.GH_REPO;
 			let ref = env.GH_BRANCH || 'main';
 
-			// 解析 ://githubusercontent.com 链接
+			let targetUrl = '';
 			const decodedPath = decodeURIComponent(path);
-			if (/raw\.githubusercontent\.com/i.test(decodedPath)) {
-				const rawPart = decodedPath.split(/raw\.githubusercontent\.com\//i)[1];
-				if (rawPart) {
-					const parts = rawPart.split('/');
-					if (parts.length >= 3) {
-						owner = parts[0];
-						repo = parts[1];
-						ref = parts[2];
-						path = '/' + parts.slice(3).join('/');
-					}
-				}
+			const rawMatch = decodedPath.match(/raw\.githubusercontent\.com\/([^\/]+)\/([^\/]+)\/([^\/]+)\/(.+)/i);
+			
+			if (rawMatch) {
+				owner = rawMatch[1];
+				repo = rawMatch[2];
+				ref = rawMatch[3];
+				path = '/' + rawMatch[4];
+				// 【策略升级】如果是 raw 链接，直接请求 raw 源站文件，彻底避开 GitHub API 的内部延迟和缓存
+				targetUrl = `https://githubusercontent.com{owner}/${repo}/${ref}${path}?_t=${Date.now()}`;
+			} else {
+				// 普通相对路径走 API 节点
+				targetUrl = `https://github.com{owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
 			}
 
-			// 无缓存 GitHub API 请求 URL
-			const apiUrl = `https://github.com{owner}/${repo}/contents${path}?ref=${ref}&_t=${Date.now()}`;
+			// 组装无缓存请求头
+			const headers = new Headers();
+			headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cloudflare-Worker');
+			headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+			headers.set('Pragma', 'no-cache');
+			headers.set('Expires', '0');
 
-			const headers = new Headers({
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Cloudflare-Worker',
-				'Accept': 'application/vnd.github.v3.raw',
-				// 强迫 GitHub 必须返回最新数据，不使用其 ETag 缓存
-				'Cache-Control': 'no-cache, no-store, must-revalidate',
-				'Pragma': 'no-cache',
-				'If-None-Match': '' 
-			});
+			// 如果是走 API，增加标准 Accept 头
+			if (!rawMatch) {
+				headers.set('Accept', 'application/vnd.github.v3.raw');
+			}
 
 			let authTokenSet = false;
 
@@ -87,11 +88,10 @@ export default {
 				headers.set('Authorization', `token ${githubToken}`);
 			}
 
-			// 发起 API 请求（全链路禁缓存）
-			const response = await fetch(apiUrl, {
+			// 向 GitHub 发起请求（CF 边缘全链路禁用缓存）
+			const response = await fetch(targetUrl, {
 				headers,
 				cf: {
-					// 显式要求 Cloudflare 边缘节点绝对不要缓存此请求
 					cacheTtl: -1, 
 					cacheTtlByStatus: { "200-299": -1, "400-599": 0 },
 					cacheEverything: false
@@ -102,14 +102,14 @@ export default {
 				const textData = await response.text();
 				const resHeaders = new Headers();
 
-				// 最高级别的禁缓存响应头，覆盖 GitHub 返回的任何 ETag / Last-Modified
+				// 给客户端（影视仓/浏览器）下发最高级别的禁缓存指令
 				resHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
 				resHeaders.set('Pragma', 'no-cache');
 				resHeaders.set('Expires', '0');
 				resHeaders.set('Access-Control-Allow-Origin', '*');
 				resHeaders.set('Access-Control-Allow-Headers', '*');
 
-				// 解析原始文件名与后缀
+				// 解析原始文件名与后缀，解决下载和识别问题
 				const rawFilename = path.split('/').pop();
 				const filename = rawFilename ? decodeURIComponent(rawFilename) : 'file.txt';
 				const ext = filename.split('.').pop().toLowerCase();
@@ -138,7 +138,7 @@ export default {
 
 				const contentType = mimeTypes[ext] || 'application/octet-stream';
 
-				// 处理附件下载逻辑
+				// 附件下载与预览响应头逻辑修正（完美保留原名与后缀）
 				if (url.searchParams.has('dl')) {
 					resHeaders.set('Content-Disposition', `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
 					resHeaders.set('Content-Type', contentType);
